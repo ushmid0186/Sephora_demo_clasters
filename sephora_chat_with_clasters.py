@@ -126,7 +126,7 @@ if submitted and query:
             cid     = cluster_map.get(vec_id, '-1')
             cluster_counts[cid] = cluster_counts.get(cid, 0) + 1
             brand   = meta.get('brand', 'Unknown')
-            name    = meta.get('name', 'Unknown')
+            name = meta.get('product_name', 'Unknown Product')
             text    = meta.get('text', '')
             review_texts.append(
                 f"<b>Cluster {cid}</b> | <b>{brand} - {name}:</b><br>{text}"
