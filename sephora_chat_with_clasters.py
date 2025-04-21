@@ -35,7 +35,7 @@ def load_cluster_summaries(path='cluster_summaries.json'):
         return json.load(f)
 
 @st.cache_data
-def load_cluster_map(path='clustered_reviews.csv'):
+def load_cluster_map(path='clusters_reviews_map.csv'):
     """
     Load mapping from review vector_id to cluster_id.
     Returns a dict: { 'P123_rev_045': '3', ... }
