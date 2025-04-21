@@ -80,72 +80,71 @@ with st.form(key='query_form'):
 # 7. Handle user queries
 # -------------------------
 if submitted and query:
-    # Special case: ask total reviews
-    if 'сколько всего отзывов' in query.lower():
-        stats = index.describe_index_stats()
-        total_reviews = stats.get('total_vector_count', 'N/A')
-        st.info(f"Всего отзывов в базе: {total_reviews}")
-    else:
-        with st.spinner('Searching reviews and clusters...'):
-            # 7.1 – Create query embedding
-            qe = client.embeddings.create(
-                input=query,
-                model='text-embedding-3-small'
-            ).data[0].embedding
+    with st.spinner('Searching reviews and clusters...'):
+        # 7.1 – Create query embedding
+        qe = client.embeddings.create(
+            input=query,
+            model='text-embedding-3-small'
+        ).data[0].embedding
 
-            # 7.2 – Query Pinecone for top 100
-            result = index.query(
-                vector=qe,
-                top_k=100,
-                include_metadata=True
+        # 7.2 – Query Pinecone for top 100
+        result = index.query(
+            vector=qe,
+            top_k=100,
+            include_metadata=True
+        )
+
+        # 7.3 – Prepare review texts + cluster counts
+        review_texts   = []
+        cluster_counts = {}
+        for match in result['matches']:
+            meta   = match['metadata']
+            vec_id = meta.get('id', '')
+            cid    = cluster_map.get(vec_id, '-1')
+            cluster_counts[cid] = cluster_counts.get(cid, 0) + 1
+
+            # Always take full_text field for the review
+            text = meta.get('full_text', '') or ''
+            if not text:
+                continue
+
+            brand   = meta.get('brand', 'Unknown')
+            product = meta.get('product_name', 'Unknown Product')
+            review_texts.append(
+                f"<b>Cluster {cid}</b> | <b>{brand} - {product}:</b><br>{text}"
             )
+        total = len(review_texts)
 
-            # 7.3 – Prepare review texts + cluster counts
-            review_texts   = []
-            cluster_counts = {}
-            for match in result['matches']:
-                meta     = match['metadata']
-                vec_id   = meta.get('id', '')
-                cid      = cluster_map.get(vec_id, '-1')
-                cluster_counts[cid] = cluster_counts.get(cid, 0) + 1
-                brand    = meta.get('brand', 'Unknown')
-                product  = meta.get('product_name', 'Unknown Product')
-                text     = meta.get('text', '')
-                review_texts.append(
-                    f"<b>Cluster {cid}</b> | <b>{brand} - {product}:</b><br>{text}"
-                )
-            total = len(review_texts)
+        # 7.4 – Summarize top 3 clusters
+        overview_lines = []
+        for cid, count in sorted(cluster_counts.items(), key=lambda x: -x[1])[:3]:
+            pct     = round(count/total*100, 1) if total else 0
+            summary = cluster_summaries.get(str(cid), {}).get('summary', '')
+            overview_lines.append(f"Cluster {cid}: {summary} ({pct}% of results)")
 
-            # 7.4 – Summarize top 3 clusters
-            overview_lines = []
-            for cid, count in sorted(cluster_counts.items(), key=lambda x: -x[1])[:3]:
-                pct     = round(count/total*100, 1) if total else 0
-                summary = cluster_summaries.get(str(cid), {}).get('summary', '')
-                overview_lines.append(f"Cluster {cid}: {summary} ({pct}% of results)")
+        # 7.5 – Build context & call GPT
+        context = "\n---\n".join(review_texts)
+        system_prompt = (
+            "You are a product review analyst for Sephora. "
+            "Answer based only on the provided reviews and cluster summaries."
+        )
+        messages = [
+            {'role':'system', 'content':system_prompt},
+            {'role':'user',   'content':f"Cluster overview:\n{'\n'.join(overview_lines)}\n\nReviews:\n{context}\n\nQuestion: {query}"}
+        ]
+        response = client.chat.completions.create(
+            model='gpt-4o',
+            messages=messages
+        )
+        answer = response.choices[0].message.content
 
-            # 7.5 – Build context & call GPT
-            context = "\n---\n".join(review_texts)
-            system_prompt = (
-                "You are a product review analyst for Sephora. "
-                "Answer based only on the provided reviews and cluster summaries."
-            )
-            messages = [
-                {'role':'system', 'content':system_prompt},
-                {'role':'user',   'content':f"Cluster overview:\n{'\n'.join(overview_lines)}\n\nReviews:\n{context}\n\nQuestion: {query}"}
-            ]
-            response = client.chat.completions.create(
-                model='gpt-4o',
-                messages=messages
-            )
-            answer = response.choices[0].message.content
-
-            # 7.6 – Save to history
-            st.session_state.history.append({
-                'question': query,
-                'answer': answer,
-                'reviews': review_texts,
-                'cluster_overview': overview_lines
-            })
+        # 7.6 – Save to history
+        st.session_state.history.append({
+            'question': query,
+            'answer': answer,
+            'reviews': review_texts,
+            'cluster_overview': overview_lines
+        })
 
 # -------------------------
 # 8. Render chat history & reviews
