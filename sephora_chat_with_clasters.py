@@ -1,20 +1,61 @@
-import os 
+import os
+import json
 import streamlit as st
+import pandas as pd
+from dotenv import load_dotenv
 from openai import OpenAI
 from pinecone import Pinecone
-import pandas as pd
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-INDEX_NAME = "sephora-reviews"
+# -------------------------
+# 1. Load environment variables
+# -------------------------
+# Explicitly load the .env file for API keys
+load_dotenv('.env')
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+PINECONE_API_KEY = os.getenv('PINECONE_API_KEY')
+# Name of the Pinecone index for reviews + clusters
+INDEX_NAME = os.getenv('PINECONE_INDEX', 'sephora-review-full')
 
-# === Clients ===TEST5
+# -------------------------
+# 2. Initialize clients
+# -------------------------
+# OpenAI client for embeddings and chat
 client = OpenAI(api_key=OPENAI_API_KEY)
+# Pinecone client for vector search
 pc = Pinecone(api_key=PINECONE_API_KEY)
 index = pc.Index(INDEX_NAME)
 
-# === UI Setup ===
-st.set_page_config(layout="wide")
+# -------------------------
+# 3. Load cluster metadata
+# -------------------------
+@st.cache_data
+def load_cluster_summaries(path='cluster_summaries.json'):
+    """
+    Load cluster summaries (id → summary, examples, top brands/products) from JSON.
+    Cached to avoid reloading on every rerun.
+    """
+    with open(path, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+@st.cache_data
+def load_cluster_map(path='clustered_reviews.csv'):
+    """
+    Load mapping from review vector_id to cluster_id.
+    Returns a dict: { 'P123_rev_045': '3', ... }
+    """
+    df_map = pd.read_csv(path)
+    # Ensure IDs are strings
+    df_map['id'] = df_map['id'].astype(str)
+    df_map['cluster'] = df_map['cluster'].astype(str)
+    return dict(zip(df_map['id'], df_map['cluster']))
+
+cluster_summaries = load_cluster_summaries()
+cluster_map = load_cluster_map()
+
+# -------------------------
+# 4. Streamlit UI setup
+# -------------------------
+st.set_page_config(layout='wide')
 st.markdown("""
     <style>
     html, body, [class*="css"]  {
@@ -44,112 +85,111 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# === Session state ===
-if "history" not in st.session_state:
-    st.session_state.history = []
+# Initialize chat history in session state
+def init_history():
+    if 'history' not in st.session_state:
+        st.session_state.history = []
+init_history()
 
-# === Query input at the top ===
-st.title("🧴 Sephora Review Chat")
-with st.form(key="query_form"):
-    query = st.text_area("", placeholder="Type your question...", height=70, label_visibility="collapsed")
-    submitted = st.form_submit_button("🔍")
+# -------------------------
+# 5. Query input
+# -------------------------
+st.title("🧴 Sephora Review Chat with Clusters")
+with st.form(key='query_form'):
+    query = st.text_area('', placeholder='Type your question...', height=70, label_visibility='collapsed')
+    submitted = st.form_submit_button('🔍')
 
+# -------------------------
+# 6. Handle user query
+# -------------------------
 if submitted and query:
-    with st.spinner("Searching reviews..."):
-        query_embed = client.embeddings.create(
+    with st.spinner('Searching reviews and clusters...'):
+        # 6.1. Create query embedding
+        query_embedding = client.embeddings.create(
             input=query,
-            model="text-embedding-3-small"
+            model='text-embedding-3-small'
         ).data[0].embedding
 
+        # 6.2. Query Pinecone for nearest reviews
         matches = index.query(
-            vector=query_embed,
+            vector=query_embedding,
             top_k=100,
             include_metadata=True
         )
 
+        # 6.3. Prepare review display and cluster stats
         review_texts = []
-        for match in matches["matches"]:
-            metadata = match["metadata"]
-            brand = metadata.get("brand", "Unknown Brand")
-            name = metadata.get("name", "Unknown Product")
-            text = metadata.get("text", "")
-            if len(text.split()) <= 150:
-                review_texts.append(f"<b>{brand} - {name}:</b><br>{text}")
+        cluster_counter = {}
+        for match in matches['matches']:
+            meta = match['metadata']
+            vec_id = meta.get('id', '')
+            # Lookup cluster for this review
+            cluster_id = cluster_map.get(vec_id, '-1')
+            cluster_counter[cluster_id] = cluster_counter.get(cluster_id, 0) + 1
+            # Build display text including cluster info
+            brand = meta.get('brand', 'Unknown Brand')
+            name = meta.get('name', 'Unknown Product')
+            text = meta.get('text', '')
+            review_texts.append(
+                f"<b>Cluster {cluster_id}</b> | <b>{brand} - {name}:</b><br>{text}"
+            )
 
-#        context = "\n---\n".join([
-#            match["metadata"].get("text", "")
-#            for match in matches["matches"]
-#            if len(match["metadata"].get("text", "").split()) <= 150
-#        ])
+        # 6.4. Summarize cluster distribution
+        total = len(matches['matches'])
+        cluster_summary_lines = []
+        for cid, count in sorted(cluster_counter.items(), key=lambda x: -x[1])[:3]:
+            pct = round(count / total * 100, 1)
+            summary = cluster_summaries.get(cid, {}).get('summary', '')
+            cluster_summary_lines.append(f"Cluster {cid}: {summary} ({pct}% of results)")
+        cluster_overview = "\n".join(cluster_summary_lines)
 
-        context = "\n---\n".join([f"{m['metadata'].get('brand', '')} - {m['metadata'].get('name', '')}: {m['metadata'].get('text', '')}" for m in matches["matches"] if len(m['metadata'].get("text", "").split()) <= 150])
-
-
+        # 6.5. Context for GPT
+        context = "\n---\n".join(review_texts)
         system_prompt = (
             "You are a product review analyst for Sephora. "
-            "Answer based only on the provided customer reviews. Be specific and do not invent anything."
-            "If possible, return a table showing how frequently issues or praises are mentioned, as counts and percentages."
-            "Do not include LaTeX or formulas in your response."
+            "Answer based only on the provided customer reviews and cluster summaries. "
+            "Be specific and do not invent anything."
         )
-
-#        response = client.chat.completions.create(
-#            model="gpt-4o",
-#            messages=[
-#                {"role": "system", "content": system_prompt},
-#                {"role": "user", "content": f"Here are the reviews:\n{context}\n\nQuestion: {query}"}
-#            ]
-#        )
-
-
-
-        # Подготовка истории из последних 3 сообщений
-        previous_history = []
-        for entry in st.session_state.history[-3:]:
-            previous_history.append({"role": "user", "content": entry["question"]})
-            previous_history.append({"role": "assistant", "content": entry["answer"]})
-
-        # Собираем весь список сообщений
         messages = [
             {"role": "system", "content": system_prompt},
-            *previous_history,
-            {"role": "user", "content": f"Here are the reviews:\n{context}\n\nQuestion: {query}"}
+            {"role": "user", "content": f"Cluster overview:\n{cluster_overview}\n\nReviews:\n{context}\n\nQuestion: {query}"}
         ]
 
-        # Запрос к GPT
+        # 6.6. Request to GPT
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model='gpt-4o',
             messages=messages
         )
-
         answer = response.choices[0].message.content
+
+        # 6.7. Save to history
         st.session_state.history.append({
-            "question": query,
-            "answer": answer,
-            "reviews": review_texts
+            'question': query,
+            'answer': answer,
+            'reviews': review_texts,
+            'cluster_overview': cluster_summary_lines
         })
 
-# === Layout ===
+# -------------------------
+# 7. Layout: chat history and reviews
+# -------------------------
 left, right = st.columns([1.6, 1.4])
 
 with left:
-    st.markdown("### Chat history")
-    with st.container():
-        st.markdown('<div class="chat-history">', unsafe_allow_html=True)
-        for entry in st.session_state.history[::-1]:
-            st.markdown(f"**Q:** {entry['question']}")
-            st.markdown(f"**A:** {entry['answer']}")
-        st.markdown('</div>', unsafe_allow_html=True)
-
-#with right:
-#    st.markdown("### 📝 Reviews used:")
-#    if st.session_state.history:
-#        for txt in st.session_state.history[-1]["reviews"]:
-#            st.markdown(f"<div class='review-box'>{txt}</div>", unsafe_allow_html=True)
-
+    st.markdown('### Chat history')
+    st.markdown('<div class="chat-history">', unsafe_allow_html=True)
+    for entry in reversed(st.session_state.history):
+        st.markdown(f"**Q:** {entry['question']}")
+        st.markdown(f"**A:** {entry['answer']}")
+    st.markdown('</div>', unsafe_allow_html=True)
 
 with right:
-    st.markdown("### 📝 Reviews used:")
+    st.markdown('### 📝 Reviews used and clusters')
     if st.session_state.history:
-        st.markdown(f"**Total reviews used:** {len(st.session_state.history[-1]['reviews'])}")
-        for txt in st.session_state.history[-1]["reviews"]:
+        last = st.session_state.history[-1]
+        st.markdown(f"**Total reviews used:** {len(last['reviews'])}")
+        st.markdown('**Cluster distribution:**')
+        for line in last['cluster_overview']:
+            st.markdown(f"- {line}")
+        for txt in last['reviews']:
             st.markdown(f"<div class='review-box'>{txt}</div>", unsafe_allow_html=True)
