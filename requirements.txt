@@ -1,0 +1,9 @@
+streamlit
+openai
+pandas
+pinecone
+python-dotenv
+plotly
+scikit-learn
+hdbscan
+umap-learn
