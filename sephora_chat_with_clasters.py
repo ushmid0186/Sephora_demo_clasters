@@ -103,8 +103,8 @@ if submitted and query:
             cid    = cluster_map.get(vec_id, '-1')
             cluster_counts[cid] = cluster_counts.get(cid, 0) + 1
 
-            # Always take full_text field for the review
-            text = meta.get('full_text', '') or ''
+            # Always take review_text field for the review
+            text = meta.get('review_text', '') or ''
             if not text:
                 continue
 
