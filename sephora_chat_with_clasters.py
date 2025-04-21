@@ -10,20 +10,17 @@ from pinecone import Pinecone
 # 1. Load environment variables
 # -------------------------
 # Explicitly load the .env file for API keys
-load_dotenv('.env')
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-PINECONE_API_KEY = os.getenv('PINECONE_API_KEY')
-# Name of the Pinecone index for reviews + clusters
-INDEX_NAME = os.getenv('PINECONE_INDEX', 'sephora-review-full')
+load_dotenv()
+OPENAI_API_KEY   = st.secrets.get("OPENAI_API_KEY")   or os.getenv("OPENAI_API_KEY")
+PINECONE_API_KEY = st.secrets.get("PINECONE_API_KEY") or os.getenv("PINECONE_API_KEY")
+INDEX_NAME       = st.secrets.get("PINECONE_INDEX")   or os.getenv("PINECONE_INDEX", "sephora-review-full")
 
 # -------------------------
 # 2. Initialize clients
 # -------------------------
-# OpenAI client for embeddings and chat
 client = OpenAI(api_key=OPENAI_API_KEY)
-# Pinecone client for vector search
-pc = Pinecone(api_key=PINECONE_API_KEY)
-index = pc.Index(INDEX_NAME)
+pc     = Pinecone(api_key=PINECONE_API_KEY)
+index  = pc.Index(INDEX_NAME)
 
 # -------------------------
 # 3. Load cluster metadata
